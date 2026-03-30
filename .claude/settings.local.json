@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//usr/local/bin/**)",
+      "Read(//Users/spandanakottur/.nvm/versions/**)",
+      "Bash(command -v node)",
+      "Read(//Users/spandanakottur/.nvm/**)",
+      "Bash(brew list:*)",
+      "Read(//opt/homebrew/bin/**)"
+    ]
+  }
+}
