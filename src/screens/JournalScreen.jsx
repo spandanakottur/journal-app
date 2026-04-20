@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useAppState } from '../hooks/useAppState.jsx'
 import { selectPrompt } from '../lib/promptSelector.js'
+import ClusterView from '../components/ClusterView.jsx'
+import RiverView from '../components/RiverView.jsx'
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -327,17 +329,68 @@ function EntriesTab() {
 }
 
 // ─── MapTab ───────────────────────────────────────────────
-// Placeholder for the D3 thoughts map (cluster + river views).
-// Will be built once entry analysis populates analysis.themes[].
+// Two views toggled by a cluster · river control:
+//
+//   cluster — force-directed graph. Entries are nodes sized by text length,
+//             coloured by primary theme. Edges connect entries that share a
+//             theme. Tap a node to see a preview card + highlight related nodes.
+//
+//   river   — swimlane timeline. 9 horizontal lanes (one per category),
+//             entry dots plotted by date. Dot size = emotionDensity.
+//
+// Empty state shown until ≥3 entries have been analysed (themes populated).
 function MapTab() {
+  const { entries } = useAppState()
+  const [view, setView] = useState('cluster')
+
+  // Only entries that have been through theme analysis are useful here.
+  // useAppState runs retroactive migration on boot, so this list grows
+  // automatically as older entries are backfilled.
+  const analysedEntries = entries.filter(e => e.analysis.themes.length > 0)
+
+  if (analysedEntries.length < 3) {
+    return (
+      <div style={styles.centred}>
+        <div style={styles.card}>
+          <p style={styles.eyebrow}>your thoughts map</p>
+          <p style={styles.body}>
+            Write a few more entries and patterns will start to appear here.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div style={styles.centred}>
-      <div style={styles.card}>
-        <p style={styles.eyebrow}>your thoughts map</p>
-        <p style={styles.body}>
-          As you write more, patterns will start to appear here.
-          Come back after a few entries.
-        </p>
+    <div style={mapStyles.wrapper}>
+      {/* cluster · river toggle — same typographic language as the tab bar */}
+      <div style={mapStyles.toggleRow}>
+        <button
+          style={{
+            ...mapStyles.toggleBtn,
+            color:      view === 'cluster' ? 'var(--blue-600)' : 'var(--gray-400)',
+            fontWeight: view === 'cluster' ? '500' : '400',
+          }}
+          onClick={() => setView('cluster')}
+        >
+          cluster
+        </button>
+        <span style={{ color: 'var(--gray-300)', fontSize: '13px' }}>·</span>
+        <button
+          style={{
+            ...mapStyles.toggleBtn,
+            color:      view === 'river' ? 'var(--blue-600)' : 'var(--gray-400)',
+            fontWeight: view === 'river' ? '500' : '400',
+          }}
+          onClick={() => setView('river')}
+        >
+          river
+        </button>
+      </div>
+
+      <div style={mapStyles.vizArea}>
+        {view === 'cluster' && <ClusterView entries={analysedEntries} />}
+        {view === 'river'   && <RiverView   entries={analysedEntries} />}
       </div>
     </div>
   )
@@ -635,5 +688,41 @@ const styles = {
     color:      'var(--gray-700)',
     lineHeight: '1.8',
     whiteSpace: 'pre-wrap',
+  },
+}
+
+// ─── Map tab styles ────────────────────────────────────────
+// Kept separate from `styles` to avoid polluting the shared namespace.
+const mapStyles = {
+  wrapper: {
+    flex:            '1',
+    display:         'flex',
+    flexDirection:   'column',
+    paddingTop:      '3rem',   // clears the fixed tab bar
+    overflow:        'hidden',
+  },
+  toggleRow: {
+    display:         'flex',
+    justifyContent:  'center',
+    alignItems:      'center',
+    gap:             '0.5rem',
+    padding:         '0.75rem 0',
+    borderBottom:    '1px solid var(--blue-100)',
+    backgroundColor: 'var(--white)',
+  },
+  toggleBtn: {
+    background:    'none',
+    border:        'none',
+    fontSize:      '13px',
+    letterSpacing: '0.04em',
+    cursor:        'pointer',
+    padding:       '0',
+    textTransform: 'lowercase',
+    transition:    'color 0.15s',
+  },
+  vizArea: {
+    flex:     '1',
+    overflow: 'auto',
+    padding:  '1rem',
   },
 }
