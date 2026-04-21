@@ -2,10 +2,11 @@
 // All localStorage keys live here so they never get mistyped
 // elsewhere in the app.
 const KEYS = {
-  PROFILE:  'journal_profile',
-  ENTRIES:  'journal_entries',
-  MEDIA:    'journal_media',
-  SETTINGS: 'journal_settings',
+  PROFILE:    'journal_profile',
+  ENTRIES:    'journal_entries',
+  MEDIA:      'journal_media',
+  SETTINGS:   'journal_settings',
+  THEME_DICT: 'journal_theme_dict',
 }
 
 // ─── Profile ───────────────────────────────────────────────
@@ -51,7 +52,7 @@ export function saveEntry(entry) {
     mode:        'journal', // 'journal' | 'conversation'
     followUps:   [],     // [{ prompt, response }]
     imageId:     null,   // reference to IndexedDB image if uploaded
-    isFreeTex:   false,  // was this a free text entry?
+    isFreeText:  false,  // was this a free text entry?
     context: {
       moodBefore: null,  // optional mood check-in
       tags:       [],    // context tags e.g. 'poor sleep', 'work stress'
@@ -99,6 +100,29 @@ export function getFreeTextBudget() {
     available:     usedThisWeek < 3,
     daysUntilReset,
   }
+}
+
+// ─── Reset ─────────────────────────────────────────────────
+// Wipes all journal data from localStorage.
+// Used by the "start over" button to return to onboarding.
+export function clearStorage() {
+  localStorage.removeItem(KEYS.PROFILE)
+  localStorage.removeItem(KEYS.ENTRIES)
+  localStorage.removeItem(KEYS.MEDIA)
+  localStorage.removeItem(KEYS.SETTINGS)
+  localStorage.removeItem(KEYS.THEME_DICT)
+}
+
+// ─── Theme dictionary ──────────────────────────────────────
+// Stores the Datamuse-expanded keyword dictionary with a
+// timestamp so themeExpander.js can decide when to refresh.
+export function getThemeDict() {
+  const raw = localStorage.getItem(KEYS.THEME_DICT)
+  return raw ? JSON.parse(raw) : null
+}
+
+export function saveThemeDict(dict) {
+  localStorage.setItem(KEYS.THEME_DICT, JSON.stringify(dict))
 }
 
 // ─── Settings ──────────────────────────────────────────────

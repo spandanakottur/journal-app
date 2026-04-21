@@ -78,6 +78,7 @@ export default function OnboardingScreen() {
     })
 
     setIsSaving(false)
+    setStep(4)
   }
 
   // ── Render ─────────────────────────────────────────────
@@ -221,9 +222,29 @@ export default function OnboardingScreen() {
           </div>
         )}
 
+        {/* Step 4 — Completion */}
+        {step === 4 && (
+          <div style={styles.step}>
+            <p style={styles.eyebrow}>you're in</p>
+            <h1 style={styles.heading}>
+              You're all set, {name}.
+            </h1>
+            <p style={styles.body}>
+              Your first prompt will be here when you come back.
+              No pressure, no schedule — just you and the page.
+            </p>
+            <button
+              style={styles.button}
+              onClick={() => updateProfile({ onboardingStep: 4 })}
+            >
+              Start journaling
+            </button>
+          </div>
+        )}
+
         {/* Step indicator dots */}
         <div style={styles.dots}>
-          {[0, 1, 2, 3].map(i => (
+          {[0, 1, 2, 3, 4].map(i => (
             <div
               key={i}
               style={{

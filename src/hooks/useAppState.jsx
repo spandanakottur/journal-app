@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, useEffect } from 'react'
-import { getProfile, saveProfile, getEntries, saveEntry, getFreeTextBudget } from '../lib/storage.js'
+import { getProfile, saveProfile, getEntries, saveEntry, getFreeTextBudget, clearStorage } from '../lib/storage.js'
+import { ensureDictionaryLoaded } from '../lib/themeExpander.js'
+import { analyseEntry } from '../lib/themeAnalyser.js'
 
 // ─── 1. Create the context ────────────────────────────────
 // Think of this as creating the broadcast channel.
@@ -26,10 +28,30 @@ export function AppProvider({ children }) {
   // This is where we hydrate React state from localStorage.
   useEffect(() => {
     const savedProfile = getProfile()
-    const savedEntries = getEntries()
+    let savedEntries   = getEntries()
+
+    // ── Retroactive theme analysis ─────────────────────────
+    // Any entry with an empty themes array gets analysed now.
+    // This handles entries saved before the pipeline existed
+    // (e.g. the simulated entries, or pre-update saves).
+    const needsMigration = savedEntries.some(e => e.analysis.themes.length === 0)
+    if (needsMigration) {
+      savedEntries = savedEntries.map(e => {
+        if (e.analysis.themes.length > 0) return e
+        const analysis = analyseEntry(e.response, e.prompt?.category ?? null)
+        return { ...e, analysis: { ...e.analysis, ...analysis } }
+      })
+      localStorage.setItem('journal_entries', JSON.stringify(savedEntries))
+    }
+
     setProfile(savedProfile)
     setEntries(savedEntries)
     setIsLoading(false)
+
+    // ── Expand theme dictionary via Datamuse (fire-and-forget) ─
+    // Runs in the background after render. If it fails, the base
+    // seed words in themeKeywords.js are used as a fallback.
+    ensureDictionaryLoaded()
   }, [])
 
   // ── Actions ────────────────────────────────────────────
@@ -44,9 +66,17 @@ export function AppProvider({ children }) {
     return updated
   }
 
-  // Save a new journal entry
+  // Reset everything — wipe localStorage and return to onboarding
+  function resetProfile() {
+    clearStorage()
+    setProfile(null)
+    setEntries([])
+  }
+
+  // Save a new journal entry — analysis runs synchronously before save
   function addEntry(entryData) {
-    const newEntry = saveEntry(entryData)
+    const analysis = analyseEntry(entryData.response ?? '', entryData.prompt?.category ?? null)
+    const newEntry = saveEntry({ ...entryData, analysis })
     setEntries(prev => [...prev, newEntry])
     return newEntry
   }
@@ -66,6 +96,7 @@ export function AppProvider({ children }) {
     isOnboarding,
     updateProfile,
     addEntry,
+    resetProfile,
   }
 
   return (

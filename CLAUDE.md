@@ -32,6 +32,25 @@ npm run build       # Production build
 npm run preview     # Preview production build
 ```
 
+## Theme Analysis Pipeline
+
+Runs at entry save time. Fully synchronous and client-side — no user text ever leaves the device.
+
+**Files:**
+- `src/data/themeKeywords.js` — base seed words per category (20–30 per category)
+- `src/lib/themeExpander.js` — fetches related words from Datamuse API weekly, caches in `journal_theme_dict` localStorage key. Exposes `ensureDictionaryLoaded()` (async, fire-and-forget on boot) and `getExpandedDict()` (sync, used by analyser)
+- `src/lib/themeAnalyser.js` — scores entry text against expanded dict, returns `{ themes, keywords, emotionDensity, sentenceLengthSpike }`. Called by `addEntry()` in `useAppState.jsx`
+
+**How it works:**
+1. On boot, `ensureDictionaryLoaded()` fires in the background — fetches Datamuse if cache is missing or >7 days old
+2. When `addEntry()` is called, `analyseEntry(response, promptCategory)` runs synchronously against the in-memory dict
+3. Primary theme = prompt's category (guaranteed). Secondary themes = categories scoring ≥ 0.03 with ≥ 2 token hits
+4. Result is merged into `entry.analysis` before `saveEntry()` — so themes are always populated on save
+
+**Datamuse API:** `api.datamuse.com/words?ml=<seed>&max=20` — fetches semantically related words for the first 3 seeds per category. No user data sent. No API key required.
+
+**Retroactive migration:** On boot, any entry with `themes: []` is re-analysed in place and re-saved to localStorage. Runs once.
+
 ## What's Already Built
 
 - `src/lib/storage.js` — storage abstraction (profile, entries, free text budget, settings)
@@ -39,6 +58,8 @@ npm run preview     # Preview production build
 - `src/lib/promptSelector.js` — exploit/explore logic with engagement scoring
 - `src/hooks/useAppState.jsx` — global state + localStorage hydration via React Context
 - `src/screens/OnboardingScreen.jsx` — Session 1 onboarding (four steps, indicator dots)
+- `src/screens/JournalScreen.jsx` — main journal screen: today / entries / map tabs
+- `docs/code-guide.md` — full codebase reference (boot flow, data models, file map, build status)
 
 ## Non-Negotiable Architecture Rules
 
@@ -76,9 +97,40 @@ Explain React patterns, JS methods, and design decisions as you go. When introdu
 - Say why you're using it here (not just "it's best practice")
 - Mention one alternative that was considered and why you didn't choose it
 
+## Screen Routing
+
+No router — conditional rendering in `src/App.jsx`:
+- `isOnboarding` (`onboardingStep < 4`) → `<OnboardingScreen />`
+- otherwise → `<JournalScreen />`
+
+`onboardingStep` is stored in `profile` in localStorage and updated via `updateProfile({ onboardingStep: N })`.
+
+## JournalScreen Architecture
+
+Three tabs (tab bar fixed to top): `today · entries · map`
+
+- **TodayTab** — internal view state machine: `choose → prompt | freewrite → done`
+  - `hasDonePromptToday(entries)` gates the prompt button
+  - `budget.available` gates the free write button
+  - Calls `selectPrompt()` from `src/lib/promptSelector.js` on mount
+- **EntriesTab** — reverse-chron list; click a card to open full-text detail view
+- **MapTab** — placeholder card; D3 cluster + river views not yet built
+
+## ResetButton
+
+Two-step inline confirmation ("sure? yes / no") — avoids jarring `window.confirm`.
+Positioned top-right in the nav bar. Styled to be quiet (gray, no border) — it is an escape hatch, not a call to action.
+
+## CSS Conventions
+
+All styles are inline JS objects (`style={...}`). No CSS modules, no Tailwind.
+CSS variables defined in `src/index.css`: `--blue-100` through `--blue-600`, `--gray-200` through `--gray-500`.
+Card pattern: white background, `1px solid var(--blue-100)` border, `borderRadius: '16px'`.
+
 ## Reference Docs
 
 Pull these in with @ when working on the relevant area:
 
 - `@docs/design-decisions.md` — full prompt system design, media layer scope, research distillations
 - `@docs/onboarding-plan.md` — four-session onboarding structure (Sessions 2–4 not yet built)
+- `@docs/code-guide.md` — full file map, data models, build status, where to add things

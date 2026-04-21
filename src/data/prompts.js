@@ -275,6 +275,7 @@ export const prompts = [
     followUp: 'How does that pattern feel when you name it?',
     minWeek: 1,
   },
+]
 
 // ─── Hobby Prompts ────────────────────────────────────────
 // Three tiers. Selector always tries tier 1 first,
