@@ -38,7 +38,8 @@ export function AppProvider({ children }) {
     if (needsMigration) {
       savedEntries = savedEntries.map(e => {
         if (e.analysis.themes.length > 0) return e
-        const analysis = analyseEntry(e.response, e.prompt?.category ?? null)
+        const plainText = (e.response ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        const analysis = analyseEntry(plainText, e.prompt?.category ?? null)
         return { ...e, analysis: { ...e.analysis, ...analysis } }
       })
       localStorage.setItem('journal_entries', JSON.stringify(savedEntries))
@@ -75,7 +76,9 @@ export function AppProvider({ children }) {
 
   // Save a new journal entry — analysis runs synchronously before save
   function addEntry(entryData) {
-    const analysis = analyseEntry(entryData.response ?? '', entryData.prompt?.category ?? null)
+    // Strip HTML tags so the theme analyser works on plain text
+    const plainText = (entryData.response ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    const analysis = analyseEntry(plainText, entryData.prompt?.category ?? null)
     const newEntry = saveEntry({ ...entryData, analysis })
     setEntries(prev => [...prev, newEntry])
     return newEntry

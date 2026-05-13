@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useAppState } from '../hooks/useAppState.jsx'
 import { selectPrompt } from '../lib/promptSelector.js'
+import { saveImage, getImage } from '../lib/imageStore.js'
 import ClusterView from '../components/ClusterView.jsx'
 import RiverView from '../components/RiverView.jsx'
 
@@ -17,6 +18,13 @@ function hasDonePromptToday(entries) {
   )
 }
 
+// Strip HTML tags and return plain text — used for submit guards and entry previews
+function stripHtml(html) {
+  const div = document.createElement('div')
+  div.innerHTML = html
+  return div.textContent || div.innerText || ''
+}
+
 // Format a date as "Today", "Yesterday", or "Apr 2"
 function formatDate(isoString) {
   const date  = new Date(isoString)
@@ -28,6 +36,251 @@ function formatDate(isoString) {
   if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
 
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+}
+
+// ─── ImageStrip ───────────────────────────────────────────
+// Shown in the write views (prompt + freewrite).
+// Renders a row of thumbnails for attached images/GIFs and an
+// "add" button for picking more files (up to maxImages).
+//
+// Props:
+//   attachments — array of { file: File, previewUrl: string }
+//   onAdd(att)  — called with a new { file, previewUrl } object
+//   onRemove(i) — called with the index to remove
+//   maxImages   — hard cap (default 5)
+//
+// Why does ImageStrip own the <input>?
+// The file input needs a local ref so we can call .click() on it
+// programmatically (hidden inputs can't be triggered any other way).
+// Keeping the ref inside this component avoids cluttering TodayTab's state.
+function ImageStrip({ attachments, onAdd, onRemove, maxImages = 5 }) {
+  const fileInputRef = useRef(null)
+  const canAddMore   = attachments.length < maxImages
+
+  function handleFileChange(e) {
+    const files     = Array.from(e.target.files)
+    const remaining = maxImages - attachments.length
+    // Slice to the remaining budget so we never exceed the cap
+    files.slice(0, remaining).forEach(file => {
+      // createObjectURL makes a temporary local URL for previewing the file
+      // without reading it into memory as a string. It's revoked on submit/remove.
+      const previewUrl = URL.createObjectURL(file)
+      onAdd({ file, previewUrl })
+    })
+    // Reset so selecting the same file again still fires onChange
+    e.target.value = ''
+  }
+
+  if (!canAddMore && attachments.length === 0) return null
+
+  return (
+    <div style={imageStyles.strip}>
+      {attachments.map((att, i) => (
+        <div key={att.previewUrl} style={imageStyles.thumb}>
+          <img src={att.previewUrl} alt="" style={imageStyles.thumbImg} />
+          <button
+            style={imageStyles.thumbRemove}
+            onClick={() => onRemove(i)}
+            aria-label="Remove image"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+
+      {canAddMore && (
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+          />
+          <button
+            style={imageStyles.addThumb}
+            onClick={() => fileInputRef.current.click()}
+            title="Add photo or GIF"
+          >
+            {attachments.length === 0 ? (
+              <>
+                <span style={{ fontSize: '18px', lineHeight: 1 }}>+</span>
+                <span style={{ fontSize: '10px', marginTop: '3px' }}>photo / gif</span>
+              </>
+            ) : (
+              <span style={{ fontSize: '20px', lineHeight: 1 }}>+</span>
+            )}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── ImageGallery ─────────────────────────────────────────
+// Shown in the entry detail view.
+// Fetches Blobs from IndexedDB by UUID, converts them to object URLs,
+// and renders them as images. Cleans up the URLs on unmount.
+//
+// Why does this component own the async loading?
+// The parent (EntriesTab) only stores IDs — it has no concept of images.
+// Keeping the fetch inside this component means EntriesTab doesn't need
+// to know anything about IndexedDB, and the loading/cleanup logic is
+// co-located with the rendering.
+function ImageGallery({ imageIds }) {
+  const [urls, setUrls] = useState([])
+
+  useEffect(() => {
+    if (!imageIds?.length) {
+      setUrls([])
+      return
+    }
+
+    let active      = true
+    // We track created URLs in a local array so the cleanup function
+    // can revoke them even if the component unmounts before the
+    // Promise resolves (the array is shared by reference).
+    const createdUrls = []
+
+    Promise.all(imageIds.map(id => getImage(id)))
+      .then(blobs => {
+        if (!active) return
+        const newUrls = blobs
+          .filter(Boolean)
+          .map(blob => {
+            const url = URL.createObjectURL(blob)
+            createdUrls.push(url)
+            return url
+          })
+        setUrls(newUrls)
+      })
+      .catch(() => {/* silently degrade if IndexedDB fails */})
+
+    // Cleanup: cancel the state update and revoke any object URLs we created.
+    // This runs when `imageIds` changes (new entry selected) or on unmount.
+    return () => {
+      active = false
+      createdUrls.forEach(url => URL.revokeObjectURL(url))
+    }
+  }, [imageIds])
+
+  if (!urls.length) return null
+
+  return (
+    <div style={imageStyles.gallery}>
+      {urls.map((url, i) => (
+        <img
+          key={url}
+          src={url}
+          alt={`Attachment ${i + 1}`}
+          style={imageStyles.galleryImg}
+        />
+      ))}
+    </div>
+  )
+}
+
+// ─── RichTextEditor ───────────────────────────────────────
+// A WYSIWYG writing area with a minimal formatting toolbar.
+// Uses contentEditable so the browser handles selection + formatting natively.
+// document.execCommand is technically deprecated but still works across all
+// modern browsers — it's the only way to apply formatting without a library.
+//
+// Why onMouseDown + e.preventDefault() on toolbar buttons?
+// Clicking a button normally shifts focus away from the editor, which would
+// clear the selection that document.execCommand needs to act on. preventDefault
+// stops the focus shift, keeping the selection intact.
+//
+// Props:
+//   placeholder  — gray hint text shown when empty
+//   onChange(html) — called on every keystroke with the current innerHTML
+//   minHeight    — CSS value for the editable area height (default '280px')
+//   autoFocus    — whether to focus on mount (default false)
+function RichTextEditor({ placeholder, onChange, minHeight = '280px', autoFocus = false }) {
+  const editorRef = useRef(null)
+  const [isEmpty, setIsEmpty] = useState(true)
+  const [activeFormats, setActiveFormats] = useState({})
+
+  // Focus on mount if requested
+  useEffect(() => {
+    if (autoFocus) editorRef.current?.focus()
+  }, [autoFocus])
+
+  // Track which formats are active at the current cursor position.
+  // selectionchange fires whenever the cursor moves or selection changes.
+  // queryCommandState returns true if the current selection/caret has that format.
+  useEffect(() => {
+    function update() {
+      setActiveFormats({
+        bold:                 document.queryCommandState('bold'),
+        italic:               document.queryCommandState('italic'),
+        underline:            document.queryCommandState('underline'),
+        strikeThrough:        document.queryCommandState('strikeThrough'),
+        insertUnorderedList:  document.queryCommandState('insertUnorderedList'),
+      })
+    }
+    document.addEventListener('selectionchange', update)
+    return () => document.removeEventListener('selectionchange', update)
+  }, [])
+
+  function applyFormat(command) {
+    editorRef.current?.focus()
+    document.execCommand(command, false, null)
+  }
+
+  function handleInput() {
+    const html  = editorRef.current.innerHTML
+    const text  = editorRef.current.textContent.trim()
+    setIsEmpty(!text && html !== '<br>')
+    onChange(html)
+  }
+
+  function toolBtn(command, label, extraStyle = {}) {
+    const isActive = activeFormats[command]
+    return (
+      <button
+        key={command}
+        onMouseDown={e => { e.preventDefault(); applyFormat(command) }}
+        style={{
+          ...rtStyles.toolBtn,
+          ...(isActive ? rtStyles.toolBtnActive : {}),
+          ...extraStyle,
+        }}
+        title={command}
+        aria-label={command}
+        aria-pressed={isActive}
+      >
+        {label}
+      </button>
+    )
+  }
+
+  return (
+    <div style={rtStyles.wrapper}>
+      <div style={rtStyles.toolbar}>
+        {toolBtn('bold',                <strong>B</strong>)}
+        {toolBtn('italic',              <em style={{ fontStyle: 'italic' }}>I</em>)}
+        {toolBtn('underline',           <span style={{ textDecoration: 'underline' }}>U</span>)}
+        {toolBtn('strikeThrough',       <span style={{ textDecoration: 'line-through' }}>S</span>)}
+        <div style={rtStyles.divider} />
+        {toolBtn('insertUnorderedList', '• list')}
+      </div>
+
+      <div style={rtStyles.editorWrapper}>
+        {isEmpty && (
+          <span style={rtStyles.placeholder} aria-hidden="true">{placeholder}</span>
+        )}
+        <div
+          ref={editorRef}
+          contentEditable
+          suppressContentEditableWarning
+          style={{ ...rtStyles.editor, minHeight }}
+          onInput={handleInput}
+        />
+      </div>
+    </div>
+  )
 }
 
 // ─── TodayTab ─────────────────────────────────────────────
@@ -44,6 +297,9 @@ function TodayTab() {
   const [currentPrompt, setCurrentPrompt] = useState(null)
   const [response,      setResponse]      = useState('')
   const [isSaving,      setIsSaving]      = useState(false)
+  // attachments: array of { file: File, previewUrl: string }
+  // Files are held in memory during writing and saved to IndexedDB on submit.
+  const [attachments,   setAttachments]   = useState([])
 
   // Derived — re-computed on every render so the done screen is always accurate
   const donePromptToday = hasDonePromptToday(entries)
@@ -63,9 +319,43 @@ function TodayTab() {
     setView('freewrite')
   }
 
-  function handleSubmitPrompt() {
-    if (!response.trim() || isSaving) return
+  // Helpers for ImageStrip callbacks
+  function handleAddAttachment(att) {
+    setAttachments(prev => [...prev, att])
+  }
+  function handleRemoveAttachment(index) {
+    setAttachments(prev => {
+      URL.revokeObjectURL(prev[index].previewUrl)
+      return prev.filter((_, i) => i !== index)
+    })
+  }
+  // Revoke all preview URLs and clear the list after saving
+  function clearAttachments() {
+    setAttachments(prev => {
+      prev.forEach(a => URL.revokeObjectURL(a.previewUrl))
+      return []
+    })
+  }
+
+  // handleSubmitPrompt is async because saveImage() (IndexedDB) is async.
+  // React event handlers can be async — React just won't await the result,
+  // but since we manage all state changes ourselves inside the function
+  // that's fine. The alternative (saving images before calling this) would
+  // force TodayTab to know about IndexedDB, breaking the separation of concerns.
+  async function handleSubmitPrompt() {
+    if (!stripHtml(response).trim() || isSaving) return
     setIsSaving(true)
+
+    // Save each image Blob to IndexedDB, get back UUID keys.
+    // If this fails (e.g. quota exceeded) we degrade gracefully and save
+    // the text entry without images rather than blocking the user.
+    let imageIds = []
+    try {
+      imageIds = await Promise.all(attachments.map(a => saveImage(a.file)))
+    } catch (err) {
+      console.warn('Could not save images to IndexedDB:', err)
+    }
+
     addEntry({
       prompt: {
         id:       currentPrompt.id,
@@ -75,23 +365,37 @@ function TodayTab() {
       response:   response.trim(),
       mode:       'journal',
       isFreeText: false,
+      imageIds,
       context: { moodBefore: null, tags: [] },
     })
+
+    clearAttachments()
     setIsSaving(false)
     setResponse('')
     setView('done')
   }
 
-  function handleSubmitFreeWrite() {
-    if (!response.trim() || isSaving) return
+  async function handleSubmitFreeWrite() {
+    if (!stripHtml(response).trim() || isSaving) return
     setIsSaving(true)
+
+    let imageIds = []
+    try {
+      imageIds = await Promise.all(attachments.map(a => saveImage(a.file)))
+    } catch (err) {
+      console.warn('Could not save images to IndexedDB:', err)
+    }
+
     addEntry({
       prompt:     null,
       response:   response.trim(),
       mode:       'journal',
       isFreeText: true,
+      imageIds,
       context: { moodBefore: null, tags: [] },
     })
+
+    clearAttachments()
     setIsSaving(false)
     setResponse('')
     setView('done')
@@ -160,17 +464,20 @@ function TodayTab() {
               <p style={styles.promptText}>{currentPrompt.text}</p>
             </>
           )}
-          <textarea
-            style={styles.textarea}
+          <RichTextEditor
             placeholder="Start writing..."
-            value={response}
-            onChange={e => setResponse(e.target.value)}
+            onChange={setResponse}
             autoFocus
           />
+          <ImageStrip
+            attachments={attachments}
+            onAdd={handleAddAttachment}
+            onRemove={handleRemoveAttachment}
+          />
           <button
-            style={{ ...styles.button, opacity: response.trim() ? 1 : 0.4 }}
+            style={{ ...styles.button, opacity: stripHtml(response).trim() ? 1 : 0.4 }}
             onClick={handleSubmitPrompt}
-            disabled={!response.trim() || isSaving}
+            disabled={!stripHtml(response).trim() || isSaving}
           >
             {isSaving ? 'Saving...' : 'Save entry'}
           </button>
@@ -185,17 +492,21 @@ function TodayTab() {
       <div style={styles.centred}>
         <div style={styles.card}>
           <p style={styles.eyebrow}>free write</p>
-          <textarea
-            style={{ ...styles.textarea, minHeight: '220px' }}
+          <RichTextEditor
             placeholder="Just write..."
-            value={response}
-            onChange={e => setResponse(e.target.value)}
+            onChange={setResponse}
+            minHeight="220px"
             autoFocus
           />
+          <ImageStrip
+            attachments={attachments}
+            onAdd={handleAddAttachment}
+            onRemove={handleRemoveAttachment}
+          />
           <button
-            style={{ ...styles.button, opacity: response.trim() ? 1 : 0.4 }}
+            style={{ ...styles.button, opacity: stripHtml(response).trim() ? 1 : 0.4 }}
             onClick={handleSubmitFreeWrite}
-            disabled={!response.trim() || isSaving}
+            disabled={!stripHtml(response).trim() || isSaving}
           >
             {isSaving ? 'Saving...' : 'Save entry'}
           </button>
@@ -282,7 +593,13 @@ function EntriesTab() {
           {selected.prompt?.text && (
             <p style={styles.detailPrompt}>{selected.prompt.text}</p>
           )}
-          <p style={styles.detailResponse}>{selected.response}</p>
+          <div
+            style={styles.detailResponse}
+            dangerouslySetInnerHTML={{ __html: selected.response }}
+          />
+          {/* ImageGallery fetches Blobs from IndexedDB by UUID and renders them.
+              It handles its own loading state and cleans up object URLs. */}
+          <ImageGallery imageIds={selected.imageIds} />
         </div>
       </div>
     )
@@ -313,14 +630,22 @@ function EntriesTab() {
         >
           <div style={styles.entryMeta}>
             <span style={styles.entryDate}>{formatDate(entry.date)}</span>
-            <span style={styles.entryTag}>
-              {entry.isFreeText ? 'free write' : (entry.prompt?.category ?? '—')}
-            </span>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              {entry.imageIds?.length > 0 && (
+                <span style={styles.imageCountBadge}>
+                  {entry.imageIds.length === 1 ? '1 image' : `${entry.imageIds.length} images`}
+                </span>
+              )}
+              <span style={styles.entryTag}>
+                {entry.isFreeText ? 'free write' : (entry.prompt?.category ?? '—')}
+              </span>
+            </div>
           </div>
           <p style={styles.entryPreview}>
-            {entry.response.length > 120
-              ? entry.response.slice(0, 120) + '…'
-              : entry.response}
+            {(() => {
+              const plain = stripHtml(entry.response)
+              return plain.length > 120 ? plain.slice(0, 120) + '…' : plain
+            })()}
           </p>
         </div>
       ))}
@@ -617,6 +942,18 @@ const styles = {
     gap:           '0.5rem',
   },
 
+  // ── Image count badge (entry list cards) ────────────────
+  imageCountBadge: {
+    fontSize:        '10px',
+    fontWeight:      '500',
+    letterSpacing:   '0.06em',
+    color:           'var(--blue-400)',
+    backgroundColor: 'var(--blue-50)',
+    border:          '1px solid var(--blue-100)',
+    borderRadius:    '4px',
+    padding:         '2px 6px',
+  },
+
   // ── Entry cards ─────────────────────────────────────────
   entryMeta: {
     display:        'flex',
@@ -687,7 +1024,154 @@ const styles = {
     fontSize:   '1rem',
     color:      'var(--gray-700)',
     lineHeight: '1.8',
-    whiteSpace: 'pre-wrap',
+  },
+}
+
+// ─── Image component styles ────────────────────────────────
+// Used by ImageStrip (write-time) and ImageGallery (detail view).
+const imageStyles = {
+  // ── ImageStrip — write-time thumbnail row ────────────────
+  strip: {
+    display:     'flex',
+    flexWrap:    'wrap',
+    gap:         '8px',
+    alignItems:  'center',
+  },
+  // Each thumbnail slot: fixed 72×72, clips the image to a rounded square
+  thumb: {
+    position:     'relative',
+    width:        '72px',
+    height:       '72px',
+    borderRadius: '8px',
+    overflow:     'hidden',
+    flexShrink:   0,
+    border:       '1px solid var(--blue-100)',
+  },
+  thumbImg: {
+    width:      '100%',
+    height:     '100%',
+    objectFit:  'cover',
+    display:    'block',
+  },
+  // Small × button overlaid top-right on each thumbnail
+  thumbRemove: {
+    position:        'absolute',
+    top:             '3px',
+    right:           '3px',
+    width:           '18px',
+    height:          '18px',
+    borderRadius:    '50%',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    color:           'white',
+    border:          'none',
+    cursor:          'pointer',
+    fontSize:        '13px',
+    lineHeight:      '1',
+    display:         'flex',
+    alignItems:      'center',
+    justifyContent:  'center',
+    padding:         0,
+  },
+  // The dashed "add more" tile — same size as thumbnails so the row stays uniform
+  addThumb: {
+    width:           '72px',
+    height:          '72px',
+    borderRadius:    '8px',
+    border:          '1.5px dashed var(--blue-200)',
+    backgroundColor: 'var(--blue-50)',
+    color:           'var(--blue-400)',
+    fontSize:        '0.7rem',
+    cursor:          'pointer',
+    display:         'flex',
+    flexDirection:   'column',
+    alignItems:      'center',
+    justifyContent:  'center',
+    flexShrink:      0,
+    padding:         0,
+    transition:      'border-color 0.15s, background-color 0.15s',
+  },
+
+  // ── ImageGallery — detail view ────────────────────────────
+  gallery: {
+    display:       'flex',
+    flexDirection: 'column',
+    gap:           '8px',
+    borderTop:     '1px solid var(--blue-100)',
+    paddingTop:    '1rem',
+    marginTop:     '0.25rem',
+  },
+  galleryImg: {
+    width:        '100%',
+    borderRadius: '8px',
+    display:      'block',
+    // GIFs animate automatically — no extra handling needed
+  },
+}
+
+// ─── Rich text editor styles ──────────────────────────────
+const rtStyles = {
+  wrapper: {
+    border:          '1px solid var(--blue-200)',
+    borderRadius:    '8px',
+    overflow:        'hidden',
+    backgroundColor: 'var(--white)',
+  },
+  toolbar: {
+    display:         'flex',
+    alignItems:      'center',
+    gap:             '2px',
+    padding:         '5px 8px',
+    borderBottom:    '1px solid var(--blue-100)',
+    backgroundColor: 'var(--blue-50)',
+  },
+  toolBtn: {
+    background:      'none',
+    border:          'none',
+    cursor:          'pointer',
+    padding:         '3px 8px',
+    borderRadius:    '4px',
+    fontSize:        '13px',
+    color:           'var(--gray-500)',
+    lineHeight:      '1.4',
+    transition:      'background-color 0.1s, color 0.1s',
+    minWidth:        '26px',
+    textAlign:       'center',
+  },
+  toolBtnActive: {
+    backgroundColor: 'var(--blue-100)',
+    color:           'var(--blue-600)',
+  },
+  divider: {
+    width:           '1px',
+    height:          '16px',
+    backgroundColor: 'var(--blue-200)',
+    margin:          '0 4px',
+    flexShrink:      0,
+  },
+  editorWrapper: {
+    position: 'relative',
+  },
+  editor: {
+    display:         'block',
+    width:           '100%',
+    padding:         '0.75rem 1rem',
+    fontSize:        '1rem',
+    outline:         'none',
+    lineHeight:      '1.65',
+    color:           'var(--gray-900)',
+    fontFamily:      'var(--font)',
+    boxSizing:       'border-box',
+    overflowY:       'auto',
+  },
+  placeholder: {
+    position:        'absolute',
+    top:             '0.75rem',
+    left:            '1rem',
+    color:           'var(--gray-300)',
+    fontSize:        '1rem',
+    lineHeight:      '1.65',
+    pointerEvents:   'none',
+    userSelect:      'none',
   },
 }
 
